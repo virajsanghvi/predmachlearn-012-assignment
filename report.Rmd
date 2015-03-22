@@ -1,0 +1,143 @@
+---
+title: "Predicting Human Activity"
+author: "Viraj Sanghvi"
+date: "03/18/2015"
+output: html_document
+---
+
+## Abstract
+
+This report details building a classification model to predict the manner in which the participants of the [Weight Lifting Exercise Dataset](http://groupware.les.inf.puc-rio.br/har) completed the exercise. We successfully were able to build a model that was 99% accurate using Random Forest with 100 trees and 9 attributes.
+
+## Selecting predictors
+
+In order to select predictors, we load the data:
+
+```{r}
+library('caret');
+df = read.csv("./pml-training.csv", 
+     header = TRUE, 
+     na.strings = c("NA", ""), 
+     stringsAsFactors = T)
+```
+
+There are over a hundred columns, so we can start by removing all columns that have NA or missing data, as well as those columns that are obviously metadata:
+
+```{r}
+# remove any predictors that are NA/empty
+df = df[,colSums(is.na(df)) == 0]
+# remove metadata fields
+df = df[,-which(names(df) %in% c("X","user_name"))]
+df = df[,-grep("timestamp|window", names(df))]
+```
+
+This brings us down to 52 columns. While not best practiced to explore the entire dataset, I noticed that there were a lot of predictors that were the x/y/z parameters of other predictors. Taking one, I created a feature plot on the data set:
+
+```{r, fig.height = 4}
+featurePlot(x = df[, c("total_accel_belt","accel_belt_x","accel_belt_y", "accel_belt_z","classe")],
+            y = df$classe,
+            plot = "pairs")
+```
+
+Looking at this plot, it confirmed my suspicions that there is not much added value in the multiple variables - they all don't seem particularly helpful, and there's no added information.
+
+To quickly confirm this, I quickly created a sample dataset to run a quick test by taking a 1000 sample of rows:
+
+```{r}
+sdf = df[sample(nrow(df), 1000),]
+```
+
+Then, I used trained a Random Forest model, with k-fold cross validation and 10 subsets, on my sample dataset, and on the same sample dataset without predictors that ended in "_x", "_y", and "_z":
+
+```{r}
+library(parallel); 
+library(doParallel);
+
+set.seed(1234)
+trCtrl <- trainControl(method="cv", number=10)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_RF_10_sample <- train(classe ~., data=sdf, method="rf", trControl = trCtrl)
+stopCluster(clust)
+set.seed(1234)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_RF_10_sample_less <- train(classe ~., data=sdf[,-grep("_[xyz]$", names(sdf))], method="rf", trControl = trCtrl)
+stopCluster(clust)
+data.frame("sample" = model_RF_10_sample$results$Accuracy[as.numeric(row.names(model_RF_10_sample$bestTune))], "sample without x/y/z" = model_RF_10_sample_less$results$Accuracy[as.numeric(row.names(model_RF_10_sample_less$bestTune))])
+```
+
+As we can see, we are still close in accuracy, even without those parameters. Even though this isn't super scientific, this and the feature plot make we willing to drop these parameters as your total number of predictors will come down to 16:
+
+```{r}
+df = df[,-grep("_[xyz]$", names(df))]
+```
+
+## Model Selection
+
+First, I tried running Random Forest, , and with k-fold cross validation with k = 10. The following is how those were run:
+
+```{r eval=FALSE}
+# Random Forest
+set.seed(1234)
+trCtrl <- trainControl(method="cv", number=10)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_RF_cv_10 <- train(classe ~.,data=df, method="rf", trControl = trCtrl)
+stopCluster(clust)
+
+# Neural Network
+set.seed(1234)
+trCtrl <- trainControl(method="cv", number=10)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_NNET_cv_10 <- train(classe ~.,data=df, method="nnet", trControl = trCtrl)
+stopCluster(clust)
+
+# Partial Least Square
+set.seed(1234)
+trCtrl <- trainControl(method="cv", number=10)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_PLS_cv_10 <- train(classe ~.,data=df, method="pls", trControl = trCtrl)
+stopCluster(clust)
+
+# Stochastic Gradient Boosting
+set.seed(1234)
+trCtrl <- trainControl(method="cv", number=10)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_GBM_cv_10 <- train(classe ~.,data=df, method="gbm", trControl = trCtrl)
+stopCluster(clust)
+```
+```{r echo=FALSE}
+load('./cv_10.models.RData')
+```
+
+The accuracy results from those runs are:
+```{r}
+data.frame(
+  "Random Forest" = model_RF_cv_10$results$Accuracy[as.numeric(row.names(model_RF_cv_10$bestTune))], 
+  "Neural Networks" = model_NNET_cv_10$results$Accuracy[as.numeric(row.names(model_NNET_cv_10$bestTune))], 
+  "Partial Least Squares" = model_PLS_cv_10$results$Accuracy[as.numeric(row.names(model_PLS_cv_10$bestTune))], 
+  "Stochastic Gradient Boosting" = model_GBM_cv_10$results$Accuracy[as.numeric(row.names(model_GBM_cv_10$bestTune))])
+```
+
+As Random Forest we can move forward with it and try it out with a repeated k-fold cross validation with k = 20 and repeats = 5:
+
+```{r eval=FALSE}
+# Random Forest
+set.seed(1234)
+trCtrl <- trainControl(method="repeatedcv", number=20, repeats = 5)
+registerDoParallel(clust <- makeForkCluster(detectCores()-1))
+model_RF_repeatedcv_20_5 <- train(classe ~.,data=df, method="rf", trControl = trCtrl)
+stopCluster(clust)
+```
+```{r echo=FALSE}
+load('./repeatedcv_20_5.models.RData')
+```
+```{r}
+model_RF_repeatedcv_20_5
+```
+
+## Final model
+
+Given this data, we can use this Random Forest model as our final model. We can estimate the out of sample error to be the following percent:
+
+```{r}
+(1 - model_RF_repeatedcv_20_5$results$Accuracy[as.numeric(row.names(model_RF_repeatedcv_20_5$bestTune))])*100
+```
